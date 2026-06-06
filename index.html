@@ -97,6 +97,12 @@
                 const [isCashPaymentModalOpen, setIsCashPaymentModalOpen] = useState(false); // 現金支付視窗
                 const [receivedAmount, setReceivedAmount] = useState(""); // 實收金額
                 const [tempTransactionData, setTempTransactionData] = useState(null);
+                const [pendingInvoiceData, setPendingInvoiceData] = useState(null);
+                const [infoModal, setInfoModal] = useState(null);
+                const [scannerModal, setScannerModal] = useState(null);
+                const [cameraError, setCameraError] = useState("");
+                const [isDonationModalOpen, setIsDonationModalOpen] = useState(false);
+                const [donationCode, setDonationCode] = useState("");
 
                 const [isMemberSelectorOpen, setIsMemberSelectorOpen] = useState(false);
                 const [memberSearchQuery, setMemberSearchQuery] = useState("");
@@ -112,6 +118,8 @@
 
                 const scrollContainerRef = useRef(null);
                 const searchInputRef = useRef(null);
+                const videoRef = useRef(null);
+                const cameraStreamRef = useRef(null);
 
                 const [employees, setEmployees] = useState([
                     { id: 1, name: "店長", role: "Manager", status: "offline" },
@@ -162,22 +170,225 @@
                 const categoriesList = ["全部", "hobo + co.", "OKA", "Ulubulu", "Ladit®", "bitplay"];
                 const storeInfo = { name: "THE STANDARD+", location: "台中市北屯區" };
                 const storageKey = "standardPlusPosDataV1";
+                const supabaseRestUrl = "https://pgkfpzbnmuxakjywnqdm.supabase.co/rest/v1";
+                const supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBna2ZwemJubXV4YWtqeXducWRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA3MjYzNjQsImV4cCI6MjA5NjMwMjM2NH0.Xy89kVqpnqnbH4Un6YBNBFOUiToNpj7g6DWyI2gk9WI";
+                const isSupabaseConfigured = supabaseAnonKey && !supabaseAnonKey.includes("請貼上");
                 const [isStorageReady, setIsStorageReady] = useState(false);
 
                 // --- 邏輯 ---
-                useEffect(() => {
-                    try {
-                        const savedData = JSON.parse(localStorage.getItem(storageKey) || "{}");
-                        if (Array.isArray(savedData.products)) setProducts(savedData.products);
-                        if (Array.isArray(savedData.historyRecords)) setHistoryRecords(savedData.historyRecords);
-                        if (Array.isArray(savedData.customers)) setCustomers(savedData.customers);
-                        if (Array.isArray(savedData.purchaseRecords)) setPurchaseRecords(savedData.purchaseRecords);
-                        if (Array.isArray(savedData.attendanceLogs)) setAttendanceLogs(savedData.attendanceLogs);
-                    } catch (error) {
-                        console.warn("無法讀取本機儲存資料", error);
-                    } finally {
-                        setIsStorageReady(true);
+                const supabaseRequest = async (tableName, options = {}) => {
+                    if (!isSupabaseConfigured) throw new Error("Supabase 尚未設定 anon key");
+                    const { query = "", method = "GET", body, prefer = "return=representation" } = options;
+                    const response = await fetch(`${supabaseRestUrl}/${tableName}${query}`, {
+                        method,
+                        headers: {
+                            apikey: supabaseAnonKey,
+                            Authorization: `Bearer ${supabaseAnonKey}`,
+                            "Content-Type": "application/json",
+                            Prefer: prefer
+                        },
+                        body: body ? JSON.stringify(body) : undefined
+                    });
+                    if (!response.ok) throw new Error(`${tableName} ${method} 失敗：${await response.text()}`);
+                    if (response.status === 204) return null;
+                    return response.json();
+                };
+
+                const productFromDb = (row) => ({
+                    id: row.id,
+                    name: row.name,
+                    price: row.price || 0,
+                    category: row.category || "未分類",
+                    image: row.image_url || row.image || "",
+                    isCombo: !!row.is_combo,
+                    stock: row.stock || 0
+                });
+
+                const productToDb = (product) => ({
+                    name: product.name,
+                    price: product.price,
+                    category: product.category,
+                    image_url: product.image,
+                    is_combo: !!product.isCombo,
+                    stock: product.stock || 0
+                });
+
+                const customerFromDb = (row) => ({
+                    id: row.id,
+                    name: row.name,
+                    phone: row.phone || "",
+                    points: row.points || 0
+                });
+
+                const purchaseFromDb = (row) => ({
+                    id: row.id,
+                    date: row.purchase_date || row.created_at?.slice(0, 10) || "",
+                    supplier: row.supplier || "",
+                    productId: row.product_id,
+                    productName: row.product_name || "",
+                    unitPrice: row.unit_price || 0,
+                    quantity: row.quantity || 0,
+                    total: row.total || 0
+                });
+
+                const attendanceFromDb = (row) => ({
+                    id: row.id,
+                    name: row.employee_name,
+                    time: row.created_at ? new Date(row.created_at).toLocaleString() : "",
+                    type: row.action
+                });
+
+                const employeeFromDb = (row) => ({
+                    id: row.id,
+                    name: row.name,
+                    role: row.role || "Staff",
+                    status: row.status || "offline"
+                });
+
+                const loadSupabaseData = async (fallbackProducts, fallbackCustomers) => {
+                    const dbProducts = await supabaseRequest("products", { query: "?select=*&order=created_at.asc" });
+                    let nextProducts = dbProducts.map(productFromDb);
+                    if (nextProducts.length === 0) {
+                        const seededProducts = await supabaseRequest("products", { method: "POST", body: fallbackProducts.map(productToDb) });
+                        nextProducts = seededProducts.map(productFromDb);
                     }
+                    setProducts(nextProducts);
+
+                    const dbCustomers = await supabaseRequest("customers", { query: "?select=*&order=created_at.asc" });
+                    let nextCustomers = dbCustomers.map(customerFromDb);
+                    if (nextCustomers.length === 0 && fallbackCustomers.length) {
+                        const seededCustomers = await supabaseRequest("customers", {
+                            method: "POST",
+                            body: fallbackCustomers.map(customer => ({
+                                name: customer.name,
+                                phone: customer.phone,
+                                points: customer.points || 0
+                            }))
+                        });
+                        nextCustomers = seededCustomers.map(customerFromDb);
+                    }
+                    setCustomers(nextCustomers);
+
+                    const dbPurchases = await supabaseRequest("purchase_records", { query: "?select=*&order=created_at.desc" });
+                    setPurchaseRecords(dbPurchases.map(row => purchaseFromDb({ ...row, product_name: nextProducts.find(product => product.id === row.product_id)?.name })));
+
+                    const dbEmployees = await supabaseRequest("employees", { query: "?select=*&order=created_at.asc" });
+                    let nextEmployees = dbEmployees.map(employeeFromDb);
+                    if (nextEmployees.length === 0) {
+                        const seededEmployees = await supabaseRequest("employees", {
+                            method: "POST",
+                            body: employees.map(employee => ({
+                                name: employee.name,
+                                role: employee.role,
+                                status: employee.status
+                            }))
+                        });
+                        nextEmployees = seededEmployees.map(employeeFromDb);
+                    }
+                    setEmployees(nextEmployees);
+
+                    const dbAttendance = await supabaseRequest("attendance_logs", { query: "?select=*&order=created_at.desc" });
+                    setAttendanceLogs(dbAttendance.map(attendanceFromDb));
+
+                    const dbOrders = await supabaseRequest("orders", { query: "?select=*&order=created_at.desc" });
+                    const dbOrderItems = await supabaseRequest("order_items", { query: "?select=*&order=id.asc" });
+                    const itemsByOrder = dbOrderItems.reduce((map, item) => {
+                        map[item.order_id] = map[item.order_id] || [];
+                        map[item.order_id].push({
+                            id: item.product_id,
+                            name: item.product_name,
+                            price: item.unit_price || 0,
+                            quantity: item.quantity || 0
+                        });
+                        return map;
+                    }, {});
+                    setHistoryRecords(dbOrders.map(order => ({
+                        orderId: order.order_no,
+                        time: order.created_at ? new Date(order.created_at).toLocaleString() : order.order_date,
+                        dateKey: order.order_date,
+                        items: itemsByOrder[order.id] || [],
+                        subtotal: order.subtotal || 0,
+                        discount: order.discount || 0,
+                        total: order.total || 0,
+                        paymentMethod: order.payment_method,
+                        receivedAmount: order.received_amount || order.total || 0,
+                        changeAmount: order.change_amount || 0,
+                        invoiceType: order.invoice_type,
+                        processedBy: order.processed_by,
+                        member: nextCustomers.find(customer => customer.id === order.member_id) || null
+                    })));
+                };
+
+                const saveOrderToSupabase = async (record, invoiceData) => {
+                    if (!isSupabaseConfigured) return;
+                    const [insertedOrder] = await supabaseRequest("orders", {
+                        method: "POST",
+                        body: [{
+                            order_no: record.orderId,
+                            order_date: record.dateKey,
+                            subtotal: record.subtotal,
+                            discount: record.discount,
+                            total: record.total,
+                            payment_method: record.paymentMethod,
+                            received_amount: record.receivedAmount,
+                            change_amount: record.changeAmount,
+                            invoice_type: invoiceData.invoiceType,
+                            donation_code: invoiceData.donationCode || null,
+                            member_id: record.member?.id || null,
+                            processed_by: record.processedBy
+                        }]
+                    });
+                    if (record.items.length) {
+                        await supabaseRequest("order_items", {
+                            method: "POST",
+                            body: record.items.map(item => ({
+                                order_id: insertedOrder.id,
+                                product_id: item.id,
+                                product_name: item.name,
+                                unit_price: item.price,
+                                quantity: item.quantity,
+                                line_total: item.price * item.quantity
+                            }))
+                        });
+                    }
+                    await Promise.all(record.items.map(item => {
+                        const nextStock = Math.max(0, (products.find(product => product.id === item.id)?.stock || 0) - item.quantity);
+                        return supabaseRequest("products", {
+                            method: "PATCH",
+                            query: `?id=eq.${item.id}`,
+                            body: { stock: nextStock },
+                            prefer: "return=minimal"
+                        });
+                    }));
+                };
+
+                useEffect(() => {
+                    const initialProducts = products;
+                    const initialCustomers = customers;
+                    const loadData = async () => {
+                        try {
+                            const savedData = JSON.parse(localStorage.getItem(storageKey) || "{}");
+                            if (Array.isArray(savedData.products)) setProducts(savedData.products);
+                            if (Array.isArray(savedData.historyRecords)) setHistoryRecords(savedData.historyRecords);
+                            if (Array.isArray(savedData.customers)) setCustomers(savedData.customers);
+                            if (Array.isArray(savedData.purchaseRecords)) setPurchaseRecords(savedData.purchaseRecords);
+                            if (Array.isArray(savedData.attendanceLogs)) setAttendanceLogs(savedData.attendanceLogs);
+                            if (Array.isArray(savedData.employees)) setEmployees(savedData.employees);
+                        } catch (error) {
+                            console.warn("無法讀取本機儲存資料", error);
+                        }
+
+                        if (isSupabaseConfigured) {
+                            try {
+                                await loadSupabaseData(initialProducts, initialCustomers);
+                            } catch (error) {
+                                console.warn("Supabase 讀取失敗，已改用本機資料", error);
+                                alert("Supabase 讀取失敗，系統暫時使用本機資料。請確認 anon key、資料表名稱與 RLS 權限。");
+                            }
+                        }
+                        setIsStorageReady(true);
+                    };
+                    loadData();
                 }, []);
 
                 useEffect(() => {
@@ -187,9 +398,10 @@
                         historyRecords,
                         customers,
                         purchaseRecords,
-                        attendanceLogs
+                        attendanceLogs,
+                        employees
                     }));
-                }, [isStorageReady, products, historyRecords, customers, purchaseRecords, attendanceLogs]);
+                }, [isStorageReady, products, historyRecords, customers, purchaseRecords, attendanceLogs, employees]);
 
                 const handleLogin = () => passwordInput === "1234" && currentUser ? setIsLoggedIn(true) : alert("請選擇使用者並輸入正確密碼");
                 
@@ -209,7 +421,12 @@
                 const subtotal = currentCart.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
                 const total = Math.max(0, subtotal - currentCart.discount);
                 const dashboardStats = useMemo(() => {
+                    const todayKey = new Date().toLocaleDateString("sv-SE");
                     const totalRevenue = historyRecords.reduce((sum, record) => sum + record.total, 0);
+                    const dailyRevenue = historyRecords.reduce((sum, record) => {
+                        const recordDateKey = record.dateKey || new Date(record.time).toLocaleDateString("sv-SE");
+                        return recordDateKey === todayKey ? sum + record.total : sum;
+                    }, 0);
                     const averageOrderValue = historyRecords.length ? Math.round(totalRevenue / historyRecords.length) : 0;
                     const productSalesMap = products.reduce((map, product) => {
                         map[product.id] = { ...product, soldQty: 0, salesAmount: 0, abcClass: "C", cumulativeRate: 0 };
@@ -241,7 +458,7 @@
                         return acc;
                     }, { A: 0, B: 0, C: 0 });
 
-                    return { totalRevenue, averageOrderValue, classifiedProducts, classCounts, orderCount: historyRecords.length };
+                    return { totalRevenue, dailyRevenue, averageOrderValue, classifiedProducts, classCounts, orderCount: historyRecords.length };
                 }, [historyRecords, products]);
 
                 const smartSuggestions = useMemo(() => {
@@ -307,11 +524,39 @@
                     setIsInvoiceModalOpen(true);
                 };
 
-                const handleCompleteTransactionWithInvoice = (invoiceType) => {
+                const stopCamera = () => {
+                    if (cameraStreamRef.current) {
+                        cameraStreamRef.current.getTracks().forEach(track => track.stop());
+                        cameraStreamRef.current = null;
+                    }
+                };
+
+                useEffect(() => {
+                    if (!scannerModal) {
+                        stopCamera();
+                        return;
+                    }
+                    setCameraError("");
+                    if (!navigator.mediaDevices?.getUserMedia) {
+                        setCameraError("此裝置或瀏覽器不支援開啟攝影機");
+                        return;
+                    }
+                    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+                        .then(stream => {
+                            cameraStreamRef.current = stream;
+                            if (videoRef.current) videoRef.current.srcObject = stream;
+                        })
+                        .catch(() => setCameraError("無法開啟攝影機，請確認瀏覽器權限"));
+                    return stopCamera;
+                }, [scannerModal]);
+
+                const finalizeTransaction = (invoiceData = { invoiceType: "不開發票" }) => {
                     const processedByName = currentUser ? currentUser.name : "未知使用者";
+                    const displayInvoiceType = invoiceData.donationCode ? `${invoiceData.invoiceType} (${invoiceData.donationCode})` : invoiceData.invoiceType;
                     const newRecord = { 
                         orderId: `ORD-${Date.now()}`, 
                         time: new Date().toLocaleString(), 
+                        dateKey: new Date().toLocaleDateString("sv-SE"),
                         items: JSON.parse(JSON.stringify(currentCart.items)), 
                         subtotal, 
                         discount: currentCart.discount, 
@@ -319,21 +564,120 @@
                         paymentMethod: tempTransactionData.method, 
                         receivedAmount: tempTransactionData.method === '現金' ? Number(receivedAmount) : total,
                         changeAmount: tempTransactionData.method === '現金' ? (Number(receivedAmount) - total) : 0,
-                        invoiceType, 
+                        invoiceType: displayInvoiceType, 
                         processedBy: processedByName, 
                         member: currentCart.selectedMember 
                     };
                     setHistoryRecords([newRecord, ...historyRecords]);
                     setProducts(prev => prev.map(p => { const ci = currentCart.items.find(x => x.id === p.id); return ci ? { ...p, stock: p.stock - ci.quantity } : p; }));
+                    saveOrderToSupabase(newRecord, invoiceData).catch(error => {
+                        console.warn("Supabase 訂單寫入失敗", error);
+                        alert("交易已保存在本機，但 Supabase 寫入失敗。請確認 anon key、RLS 與欄位名稱。");
+                    });
                     setCarts(prev => prev.map((c, i) => i === activeCartIndex ? { ...c, items: [], discount: 0, selectedMember: null } : c));
                     setIsInvoiceModalOpen(false);
+                    setIsDonationModalOpen(false);
+                    setScannerModal(null);
+                    setInfoModal(null);
+                    setPendingInvoiceData(null);
+                    setDonationCode("");
+                    setTempTransactionData(null);
+                    stopCamera();
+                };
+
+                const proceedPaymentAfterInvoice = (invoiceData) => {
+                    setPendingInvoiceData(invoiceData);
+                    if (tempTransactionData.method === "信用卡" || tempTransactionData.method === "APPLE PAY") {
+                        setInfoModal({ message: "請依刷卡機上指示操作", nextStep: "finalize" });
+                    } else if (tempTransactionData.method === "LINE PAY") {
+                        setScannerModal({ type: "linePay", title: "掃描 LINE PAY 條碼", description: "請將顧客手機上的 LINE PAY 條碼對準鏡頭", nextStep: "finalize" });
+                    } else {
+                        finalizeTransaction(invoiceData);
+                    }
+                };
+
+                const handleInvoiceSelected = (invoiceType) => {
+                    const invoiceData = { invoiceType };
+                    setIsInvoiceModalOpen(false);
+                    if (invoiceType === "電子發票") {
+                        setPendingInvoiceData(invoiceData);
+                        setInfoModal({ message: "發票已列印", nextStep: "payment" });
+                    } else if (invoiceType === "雲端載具") {
+                        setPendingInvoiceData(invoiceData);
+                        setScannerModal({ type: "carrier", title: "掃描雲端載具條碼", description: "請將會員手機載具條碼對準鏡頭", nextStep: "carrierDone" });
+                    } else if (invoiceType === "捐贈發票") {
+                        setDonationCode("");
+                        setIsDonationModalOpen(true);
+                    } else {
+                        proceedPaymentAfterInvoice(invoiceData);
+                    }
+                };
+
+                const handleDonationConfirm = () => {
+                    if (!donationCode.trim()) {
+                        alert("請輸入捐贈碼");
+                        return;
+                    }
+                    const invoiceData = { invoiceType: "捐贈發票", donationCode: donationCode.trim() };
+                    setIsDonationModalOpen(false);
+                    proceedPaymentAfterInvoice(invoiceData);
+                };
+
+                const handleScannerComplete = () => {
+                    if (!scannerModal) return;
+                    stopCamera();
+                    if (scannerModal.nextStep === "carrierDone") {
+                        setScannerModal(null);
+                        setInfoModal({ message: "發票已存入載具", nextStep: "payment" });
+                    } else {
+                        setScannerModal(null);
+                        finalizeTransaction(pendingInvoiceData);
+                    }
+                };
+
+                const handleInfoConfirm = () => {
+                    const nextStep = infoModal?.nextStep;
+                    setInfoModal(null);
+                    if (nextStep === "payment") proceedPaymentAfterInvoice(pendingInvoiceData);
+                    if (nextStep === "finalize") finalizeTransaction(pendingInvoiceData);
                 };
 
                 const handleClockAction = (empId, type) => {
                     const time = new Date().toLocaleString();
                     const emp = employees.find(e => e.id === empId);
-                    setAttendanceLogs(prev => [{ id: Date.now(), name: emp.name, time, type: type === 'in' ? '上班' : '下班' }, ...prev]);
-                    setEmployees(prev => prev.map(e => e.id === empId ? { ...e, status: type === 'in' ? 'online' : 'offline' } : e));
+                    const nextStatus = type === 'in' ? 'online' : 'offline';
+                    const log = { id: Date.now(), name: emp.name, time, type: type === 'in' ? '上班' : '下班' };
+                    setAttendanceLogs(prev => [log, ...prev]);
+                    setEmployees(prev => prev.map(e => e.id === empId ? { ...e, status: nextStatus } : e));
+                    if (isSupabaseConfigured) {
+                        supabaseRequest("attendance_logs", {
+                            method: "POST",
+                            body: [{ employee_name: emp.name, action: log.type }]
+                        }).catch(error => console.warn("Supabase 打卡寫入失敗", error));
+                        supabaseRequest("employees", {
+                            method: "PATCH",
+                            query: `?id=eq.${empId}`,
+                            body: { status: nextStatus },
+                            prefer: "return=minimal"
+                        }).catch(error => console.warn("Supabase 員工狀態更新失敗", error));
+                    }
+                };
+
+                const handleAddCustomer = () => {
+                    if (!newCustName) return;
+                    const localCustomer = { id: `C${Date.now().toString().slice(-4)}`, name: newCustName, phone: newCustPhone, points: 0 };
+                    setCustomers([localCustomer, ...customers]);
+                    if (isSupabaseConfigured) {
+                        supabaseRequest("customers", {
+                            method: "POST",
+                            body: [{ name: newCustName, phone: newCustPhone, points: 0 }]
+                        }).then(rows => {
+                            const savedCustomer = customerFromDb(rows[0]);
+                            setCustomers(prev => prev.map(customer => customer.id === localCustomer.id ? savedCustomer : customer));
+                        }).catch(error => console.warn("Supabase 會員寫入失敗", error));
+                    }
+                    setNewCustName("");
+                    setNewCustPhone("");
                 };
 
                 const handleScroll = () => {
@@ -344,10 +688,32 @@
 
                 const handleAddPurchase = () => {
                     if (!newPurchase.productId || !newPurchase.quantity || !newPurchase.unitPrice) return;
-                    const prod = products.find(p => p.id === parseInt(newPurchase.productId));
-                    const record = { id: `P-${Date.now().toString().slice(-4)}`, date: new Date().toLocaleDateString(), supplier: newPurchase.supplier || "通用供應商", productName: prod.name, unitPrice: parseInt(newPurchase.unitPrice), quantity: parseInt(newPurchase.quantity), total: parseInt(newPurchase.unitPrice) * parseInt(newPurchase.quantity) };
+                    const prod = products.find(p => String(p.id) === String(newPurchase.productId));
+                    const record = { id: `P-${Date.now().toString().slice(-4)}`, date: new Date().toLocaleDateString("sv-SE"), supplier: newPurchase.supplier || "通用供應商", productId: prod.id, productName: prod.name, unitPrice: parseInt(newPurchase.unitPrice), quantity: parseInt(newPurchase.quantity), total: parseInt(newPurchase.unitPrice) * parseInt(newPurchase.quantity) };
                     setPurchaseRecords([record, ...purchaseRecords]);
                     setProducts(prev => prev.map(p => p.id === prod.id ? { ...p, stock: p.stock + record.quantity } : p));
+                    if (isSupabaseConfigured) {
+                        supabaseRequest("purchase_records", {
+                            method: "POST",
+                            body: [{
+                                product_id: prod.id,
+                                supplier: record.supplier,
+                                unit_price: record.unitPrice,
+                                quantity: record.quantity,
+                                total: record.total,
+                                purchase_date: record.date
+                            }]
+                        }).then(rows => {
+                            const savedRecord = purchaseFromDb({ ...rows[0], product_name: prod.name });
+                            setPurchaseRecords(prev => prev.map(item => item.id === record.id ? savedRecord : item));
+                        }).catch(error => console.warn("Supabase 進貨寫入失敗", error));
+                        supabaseRequest("products", {
+                            method: "PATCH",
+                            query: `?id=eq.${prod.id}`,
+                            body: { stock: prod.stock + record.quantity },
+                            prefer: "return=minimal"
+                        }).catch(error => console.warn("Supabase 商品庫存更新失敗", error));
+                    }
                     setNewPurchase({ productId: "", supplier: "", unitPrice: "", quantity: "" });
                     setIsAddPurchaseModalOpen(false);
                 };
@@ -484,14 +850,19 @@
                             ) : activeView === 'dashboard' ? (
                                 <div className="flex-1 p-6 overflow-y-auto custom-scrollbar bg-gray-50/50 text-gray-700">
                                     <div className="max-w-7xl mx-auto space-y-6">
-                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                            <div className="bg-white border border-gray-100 rounded-3xl p-6 shadow-sm">
-                                                <div className="flex items-center justify-between mb-6"><p className="text-xs font-black text-gray-400 uppercase tracking-widest">總營收</p><div className="w-10 h-10 bg-[#EAF6F0] text-[#59B88D] rounded-2xl flex items-center justify-center"><Icon name="Banknote" size={20}/></div></div>
-                                                <p className="text-4xl font-black text-gray-800 tracking-tight">${dashboardStats.totalRevenue.toLocaleString()}</p>
-                                                <p className="text-xs font-bold text-gray-300 mt-3">來自 {dashboardStats.orderCount} 筆交易</p>
-                                            </div>
-                                            <div className="bg-white border border-gray-100 rounded-3xl p-6 shadow-sm">
-                                                <div className="flex items-center justify-between mb-6"><p className="text-xs font-black text-gray-400 uppercase tracking-widest">平均客單價</p><div className="w-10 h-10 bg-blue-50 text-blue-500 rounded-2xl flex items-center justify-center"><Icon name="TrendingUp" size={20}/></div></div>
+	                                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+	                                            <div className="bg-white border border-gray-100 rounded-3xl p-6 shadow-sm">
+	                                                <div className="flex items-center justify-between mb-6"><p className="text-xs font-black text-gray-400 uppercase tracking-widest">總營收</p><div className="w-10 h-10 bg-[#EAF6F0] text-[#59B88D] rounded-2xl flex items-center justify-center"><Icon name="Banknote" size={20}/></div></div>
+	                                                <p className="text-4xl font-black text-gray-800 tracking-tight">${dashboardStats.totalRevenue.toLocaleString()}</p>
+	                                                <p className="text-xs font-bold text-gray-300 mt-3">來自 {dashboardStats.orderCount} 筆交易</p>
+	                                            </div>
+	                                            <div className="bg-white border border-gray-100 rounded-3xl p-6 shadow-sm">
+	                                                <div className="flex items-center justify-between mb-6"><p className="text-xs font-black text-gray-400 uppercase tracking-widest">單日營收</p><div className="w-10 h-10 bg-emerald-50 text-emerald-500 rounded-2xl flex items-center justify-center"><Icon name="Clock" size={20}/></div></div>
+	                                                <p className="text-4xl font-black text-gray-800 tracking-tight">${dashboardStats.dailyRevenue.toLocaleString()}</p>
+	                                                <p className="text-xs font-bold text-gray-300 mt-3">{new Date().toLocaleDateString()} 今日累計</p>
+	                                            </div>
+	                                            <div className="bg-white border border-gray-100 rounded-3xl p-6 shadow-sm">
+	                                                <div className="flex items-center justify-between mb-6"><p className="text-xs font-black text-gray-400 uppercase tracking-widest">平均客單價</p><div className="w-10 h-10 bg-blue-50 text-blue-500 rounded-2xl flex items-center justify-center"><Icon name="TrendingUp" size={20}/></div></div>
                                                 <p className="text-4xl font-black text-gray-800 tracking-tight">${dashboardStats.averageOrderValue.toLocaleString()}</p>
                                                 <p className="text-xs font-bold text-gray-300 mt-3">總營收 / 交易筆數</p>
                                             </div>
@@ -579,7 +950,7 @@
                                                     <div className="space-y-4">
                                                         <input className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-[#59B88D] font-bold" value={newCustName} onChange={e=>setNewCustName(e.target.value)} placeholder="姓名" />
                                                         <input className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-[#59B88D] font-bold" value={newCustPhone} onChange={e=>setNewCustPhone(e.target.value)} placeholder="電話" />
-                                                        <button onClick={()=>{ if(!newCustName) return; setCustomers([{id:`C${Date.now().toString().slice(-4)}`, name:newCustName, phone:newCustPhone, points:0},...customers]); setNewCustName(""); setNewCustPhone(""); }} className="w-full py-3 bg-[#59B88D] text-white font-bold rounded-xl shadow-lg">確認新增</button>
+	                                                        <button onClick={handleAddCustomer} className="w-full py-3 bg-[#59B88D] text-white font-bold rounded-xl shadow-lg">確認新增</button>
                                                     </div>
                                                 </div>
                                                 <div className="flex-1 overflow-y-auto p-6 grid grid-cols-2 gap-4 custom-scrollbar">
@@ -658,7 +1029,7 @@
                                     <h2 className="text-2xl font-black mb-2 text-gray-800 tracking-tight text-center">結帳付款確認</h2>
                                     <div className="text-5xl font-black text-[#59B88D] mb-10 tracking-tighter text-center">${total.toLocaleString()}</div>
                                     <div className="grid grid-cols-1 gap-3.5">
-                                        {['現金', '信用卡', 'LINE PAY', 'APPLE PAY', '轉帳'].map(m => <button key={m} onClick={() => handleInitiateTransaction(m)} className="flex items-center justify-between px-7 py-5 bg-gray-50 border-2 border-gray-100 rounded-3xl font-black text-gray-700 hover:bg-[#59B88D] hover:text-white hover:border-[#59B88D] transition-all group"><span>{m}支付</span><Icon name="ChevronRight" size={20} className="group-hover:translate-x-1 transition-transform"/></button>)}
+	                                        {['現金', '信用卡', 'LINE PAY', 'APPLE PAY'].map(m => <button key={m} onClick={() => handleInitiateTransaction(m)} className="flex items-center justify-between px-7 py-5 bg-gray-50 border-2 border-gray-100 rounded-3xl font-black text-gray-700 hover:bg-[#59B88D] hover:text-white hover:border-[#59B88D] transition-all group"><span>{m}支付</span><Icon name="ChevronRight" size={20} className="group-hover:translate-x-1 transition-transform"/></button>)}
                                     </div>
                                     <button onClick={()=>setIsCheckingOut(false)} className="mt-8 text-gray-400 text-sm font-bold underline">返回購物車</button>
                                 </div>
@@ -680,15 +1051,50 @@
                             </div>
                         )}
 
-                        {isInvoiceModalOpen && (
-                            <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[130] p-4 text-center">
-                                <div className="bg-white rounded-[40px] w-full max-w-md p-10 animate-in zoom-in duration-300 shadow-2xl">
-                                    <h2 className="text-2xl font-black mb-10 text-gray-800">發票方式</h2>
-                                    <div className="grid grid-cols-1 gap-4 mb-10">{['電子發票', '雲端發票', '捐贈發票'].map(t => <button key={t} onClick={()=>handleCompleteTransactionWithInvoice(t)} className="flex items-center gap-5 p-5 bg-[#F8FAFB] border-2 border-transparent hover:border-[#59B88D] rounded-3xl transition-all text-left"><Icon name="Ticket" size={24} className="text-[#59B88D]"/><div className="font-black text-gray-700">{t}</div></button>)}</div>
-                                    <button onClick={()=>handleCompleteTransactionWithInvoice('不開發票')} className="w-full py-5 bg-gray-100 text-gray-500 font-black rounded-3xl">不開發票</button>
-                                </div>
-                            </div>
-                        )}
+	                        {isInvoiceModalOpen && (
+	                            <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[130] p-4 text-center">
+	                                <div className="bg-white rounded-[40px] w-full max-w-md p-10 animate-in zoom-in duration-300 shadow-2xl">
+	                                    <h2 className="text-2xl font-black mb-10 text-gray-800">發票方式</h2>
+	                                    <div className="grid grid-cols-1 gap-4 mb-10">{['電子發票', '雲端載具', '捐贈發票'].map(t => <button key={t} onClick={()=>handleInvoiceSelected(t)} className="flex items-center gap-5 p-5 bg-[#F8FAFB] border-2 border-transparent hover:border-[#59B88D] rounded-3xl transition-all text-left"><Icon name="Ticket" size={24} className="text-[#59B88D]"/><div className="font-black text-gray-700">{t}</div></button>)}</div>
+	                                    <button onClick={()=>handleInvoiceSelected('不開發票')} className="w-full py-5 bg-gray-100 text-gray-500 font-black rounded-3xl">不開發票</button>
+	                                </div>
+	                            </div>
+	                        )}
+
+	                        {isDonationModalOpen && (
+	                            <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[135] p-4 text-center">
+	                                <div className="bg-white rounded-[40px] w-full max-w-md p-10 animate-in zoom-in duration-300 shadow-2xl">
+	                                    <h2 className="text-2xl font-black mb-4 text-gray-800">輸入捐贈碼</h2>
+	                                    <p className="text-sm text-gray-400 font-bold mb-8">請輸入欲捐贈發票的愛心碼或捐贈碼</p>
+	                                    <input autoFocus className="w-full h-16 bg-gray-50 border-2 border-gray-100 rounded-3xl px-6 text-2xl font-black text-center outline-none focus:border-[#59B88D] mb-8" value={donationCode} onChange={e=>setDonationCode(e.target.value)} placeholder="例如 919" />
+	                                    <div className="grid grid-cols-2 gap-4"><button onClick={()=>{setIsDonationModalOpen(false); setIsInvoiceModalOpen(true);}} className="py-4 bg-gray-100 text-gray-500 rounded-2xl font-black">返回</button><button onClick={handleDonationConfirm} className="py-4 bg-[#59B88D] text-white rounded-2xl font-black shadow-lg">確認捐贈</button></div>
+	                                </div>
+	                            </div>
+	                        )}
+
+	                        {scannerModal && (
+	                            <div className="fixed inset-0 bg-black/70 backdrop-blur-md flex items-center justify-center z-[145] p-4 text-center">
+	                                <div className="bg-white rounded-[40px] w-full max-w-lg overflow-hidden animate-in zoom-in duration-300 shadow-2xl">
+	                                    <div className="p-8 border-b border-gray-100"><h2 className="text-2xl font-black text-gray-800">{scannerModal.title}</h2><p className="text-sm text-gray-400 font-bold mt-2">{scannerModal.description}</p></div>
+	                                    <div className="p-6">
+	                                        <div className="aspect-video bg-gray-900 rounded-3xl overflow-hidden flex items-center justify-center mb-6">
+	                                            {cameraError ? <p className="text-white/80 text-sm font-bold px-6">{cameraError}</p> : <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />}
+	                                        </div>
+	                                        <div className="grid grid-cols-2 gap-4"><button onClick={()=>{stopCamera(); setScannerModal(null); setIsInvoiceModalOpen(true);}} className="py-4 bg-gray-100 text-gray-500 rounded-2xl font-black">取消</button><button onClick={handleScannerComplete} className="py-4 bg-[#59B88D] text-white rounded-2xl font-black shadow-lg">完成掃描</button></div>
+	                                    </div>
+	                                </div>
+	                            </div>
+	                        )}
+
+	                        {infoModal && (
+	                            <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[155] p-4 text-center">
+	                                <div className="bg-white rounded-[40px] w-full max-w-sm p-10 animate-in zoom-in duration-300 shadow-2xl">
+	                                    <div className="w-16 h-16 bg-[#EAF6F0] text-[#59B88D] rounded-full flex items-center justify-center mx-auto mb-6"><Icon name="Ticket" size={30}/></div>
+	                                    <h2 className="text-2xl font-black mb-8 text-gray-800">{infoModal.message}</h2>
+	                                    <button onClick={handleInfoConfirm} className="w-full py-4 bg-[#59B88D] text-white rounded-2xl font-black shadow-lg">確認</button>
+	                                </div>
+	                            </div>
+	                        )}
 
                         {selectedHistoryRecord && (
                             <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[150] p-4 text-left">
